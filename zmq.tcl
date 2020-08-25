@@ -2065,7 +2065,7 @@ critcl::ccommand ::zmq::context {cd ip objc objv} {
     Tcl_SetHashValue(hashEntry, ccd);
     Tcl_CreateObjCommand(ip, Tcl_GetStringFromObj(fqn, 0), zmq_context_objcmd, (ClientData)ccd, zmq_free_client_data);
     Tcl_SetObjResult(ip, fqn);
-    Tcl_CreateEventSource(zmqEventSetup, zmqEventCheck, cd);
+    // Tcl_CreateEventSource(zmqEventSetup, zmqEventCheck, cd);
     return TCL_OK;
 } -clientdata zmqClientDataInitVar
 
@@ -2386,7 +2386,7 @@ critcl::ccommand ::zmq::zframe_strhex {cd ip objc objv} {
 
 critcl::cinit {
     zmqClientDataInitVar = (ZmqClientData*)ckalloc(sizeof(ZmqClientData));
-    zmqClientDataInitVar->interp = interp;
+    zmqClientDataInitVar->interp = ip;
     zmqClientDataInitVar->readableCommands = (struct Tcl_HashTable*)ckalloc(sizeof(struct Tcl_HashTable));
     Tcl_InitHashTable(zmqClientDataInitVar->readableCommands, TCL_ONE_WORD_KEYS);
     zmqClientDataInitVar->writableCommands = (struct Tcl_HashTable*)ckalloc(sizeof(struct Tcl_HashTable));
