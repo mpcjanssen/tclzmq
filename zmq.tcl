@@ -2042,7 +2042,6 @@ critcl::ccommand ::zmq::context {cd ip objc objv} {
 	}
     }
     zmqp = zmq_ctx_new();
-	# fprintf(stderr, "ctxtxtxtx %p\n",zmqp );
     last_zmq_errno = zmq_errno();
     if (zmqp == NULL) {
 	Tcl_SetObjResult(ip, Tcl_NewStringObj(zmq_strerror(last_zmq_errno), TCL_AUTO_LENGTH));
@@ -2100,14 +2099,12 @@ critcl::ccommand ::zmq::socket {cd ip objc objv} {
 	typeidx = 3;
     }
     ctxp = known_context(ip, objv[ctxidx]);
-	# fprintf(stderr, "ctxtxtxtx %p\n",ctxp );
     if (!ctxp) {
 	Tcl_DecrRefCount(fqn);
 	return TCL_ERROR;
     }
     if (Tcl_GetIndexFromObj(ip, objv[typeidx], stypes, "type", 0, &stindex) != TCL_OK)
 	return TCL_ERROR;
-	# fprintf(stderr, "yyyyyyyyy %d\n",stindex );
     switch((enum ExObjSocketMethods)stindex) {
     case ZST_PAIR: stype = ZMQ_PAIR; break;
     case ZST_PUB: stype = ZMQ_PUB; break;
@@ -2122,7 +2119,6 @@ critcl::ccommand ::zmq::socket {cd ip objc objv} {
     case ZST_XSUB: stype = ZMQ_XSUB; break;
     case ZST_STREAM: stype = ZMQ_STREAM; break;
     }
-	# fprintf(stderr, "xxxxxxxxxxx %p\n",ctxp );
     sockp = zmq_socket(ctxp, stype);
     last_zmq_errno = zmq_errno();
     if (sockp == NULL) {
