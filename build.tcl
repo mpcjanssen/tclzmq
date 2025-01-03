@@ -1,7 +1,7 @@
 #!/bin/sh
 # -*- tcl -*- \
 exec tclsh "$0" ${1+"$@"}
-package require Tcl 8.5
+package require Tcl 9.0
 set me [file normalize [info script]]
 set packages {
     zmq
