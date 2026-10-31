@@ -1,0 +1,35 @@
+source [file join [file dirname [file normalize [info script]]] setup.tcl]
+
+# Frames must cross the wire byte-for-byte, otherwise Jupyter HMAC signatures break.
+test bytes-1.1 {Tcl to libzmq and back is byte exact, incl. UTF-8 and all byte values} -constraints pyzmq -setup {
+    set ctx [zmq::ctx_new]
+    set chan [open |[list $::python -u -c {
+import zmq, hashlib, hmac
+s = zmq.Context().socket(zmq.DEALER)
+print(s.bind_to_random_port("tcp://127.0.0.1"))
+frames = s.recv_multipart()
+print(" ".join(hmac.new(b"k\xc3\xa9y", f, hashlib.sha256).hexdigest() for f in frames))
+s.send_multipart(frames)
+}] r]
+    gets $chan port
+} -body {
+    set s [zmq::socket $ctx ZMQ_DEALER]
+    zmq::Attach $s [::socket 127.0.0.1 $port]
+    set json [encoding convertto utf-8 "{\"text\": \"caf\u00e9 \u20ac \U1F600\"}"]
+    set all ""
+    for {set i 0} {$i < 256} {incr i} {append all [binary format c $i]}
+    set frames [list <IDS|MSG> $json $all]
+    zmq::send $s [lindex $frames 0] ZMQ_SNDMORE
+    zmq::send $s [lindex $frames 1] ZMQ_SNDMORE
+    zmq::send $s [lindex $frames 2]
+    set pyDigests [gets $chan]
+    set back [list [zmq::recv $s] [zmq::recv $s] [zmq::recv $s]]
+    list [llength $pyDigests] [expr {$back eq $frames}] \
+        [encoding convertfrom utf-8 [lindex $back 1]]
+} -cleanup {
+    zmq::ctx_term $ctx
+    catch {exec kill [pid $chan]}
+    catch {close $chan}
+} -result [list 3 1 "{\"text\": \"caf\u00e9 \u20ac \U1F600\"}"]
+
+cleanupTests

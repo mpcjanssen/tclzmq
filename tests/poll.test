@@ -1,0 +1,110 @@
+source [file join [file dirname [file normalize [info script]]] setup.tcl]
+
+set setup {set ctx [zmq::ctx_new]}
+set cleanup {zmq::ctx_term $ctx}
+
+test poll-1.1 {ZMQ_EVENTS follows connection and queue state} -setup $setup -body {
+    set a [zmq::socket $ctx ZMQ_PAIR]
+    set b [zmq::socket $ctx ZMQ_PAIR]
+    set r [zmq::getsockopt $a ZMQ_EVENTS]
+    pipePair $a $b
+    waitFor {[zmq::getsockopt $a ZMQ_EVENTS] == 2}
+    lappend r [zmq::getsockopt $a ZMQ_EVENTS]
+    zmq::send $b hi
+    waitFor {[zmq::getsockopt $a ZMQ_EVENTS] == 3}
+    lappend r [zmq::getsockopt $a ZMQ_EVENTS]
+} -cleanup $cleanup -result {0 2 3}
+
+test poll-1.2 {one-directional socket types} -setup $setup -body {
+    set push [zmq::socket $ctx ZMQ_PUSH]
+    set pull [zmq::socket $ctx ZMQ_PULL]
+    pipePair $push $pull
+    zmq::send $push x
+    waitFor {[zmq::getsockopt $pull ZMQ_EVENTS] != 0}
+    list [zmq::getsockopt $pull ZMQ_EVENTS] [zmq::getsockopt $push ZMQ_EVENTS] \
+        [zmqerr {zmq::send $pull x}] [zmqerr {zmq::recv $push}]
+} -cleanup $cleanup -result {1 2 {ZMQ ENOTSUP} {ZMQ ENOTSUP}}
+
+test poll-2.1 {timeout 0 returns immediately} -setup $setup -body {
+    zmq::poll [list [list [zmq::socket $ctx ZMQ_PAIR] {ZMQ_POLLIN ZMQ_POLLOUT}]] 0
+} -cleanup $cleanup -result 0
+
+test poll-2.2 {poll times out} -setup $setup -body {
+    set s [zmq::socket $ctx ZMQ_PAIR]
+    set t [clock milliseconds]
+    list [zmq::poll [list [list $s POLLIN]] 50] [expr {[clock milliseconds] - $t >= 50}]
+} -cleanup $cleanup -result {0 1}
+
+test poll-2.3 {poll wakes when a message arrives} -setup $setup -body {
+    set a [zmq::socket $ctx ZMQ_PAIR]
+    set b [zmq::socket $ctx ZMQ_PAIR]
+    pipePair $a $b
+    after 30 [list zmq::send $b late]
+    set r [zmq::poll [list [list $a POLLIN]] 2000]
+    list $r [zmq::recv $a ZMQ_DONTWAIT]
+} -cleanup $cleanup -result {1 late}
+
+test poll-2.4 {revents per item, masked by requested events} -setup $setup -body {
+    set a [zmq::socket $ctx ZMQ_PAIR]
+    set b [zmq::socket $ctx ZMQ_PAIR]
+    set c [zmq::socket $ctx ZMQ_PAIR]
+    pipePair $a $b
+    zmq::send $b x
+    waitFor {[zmq::getsockopt $a ZMQ_EVENTS] == 3}
+    zmq::poll [list [list $a POLLIN] [list $a {POLLIN POLLOUT}] [list $c POLLIN]] 0
+} -cleanup $cleanup -result {1 3 0}
+
+test poll-2.5 {poll inside a coroutine} -setup $setup -body {
+    set a [zmq::socket $ctx ZMQ_PAIR]
+    set b [zmq::socket $ctx ZMQ_PAIR]
+    pipePair $a $b
+    unset -nocomplain ::polled
+    coroutine poller apply {{a} {set ::polled [zmq::poll [list [list $a POLLIN]]]}} $a
+    set before [info exists ::polled]
+    zmq::send $b x
+    waitFor {[info exists ::polled]}
+    list $before $::polled
+} -cleanup $cleanup -result {0 1}
+
+test poll-2.6 {ctx_shutdown interrupts poll} -setup $setup -body {
+    set s [zmq::socket $ctx ZMQ_PAIR]
+    after 20 [list zmq::ctx_shutdown $ctx]
+    zmqerr {zmq::poll [list [list $s POLLIN]]}
+} -cleanup $cleanup -result {ZMQ ETERM}
+
+test poll-3.1 {Tcl channels} -body {
+    lassign [chan pipe] r w
+    fconfigure $w -buffering none
+    fileevent $r readable {set ::userHandler 1}
+    set before [zmq::poll [list [list $r POLLIN] [list $w POLLOUT]] 0]
+    puts -nonewline $w x
+    set after [zmq::poll [list [list $r POLLIN]] 2000]
+    list $before $after [fileevent $r readable]
+} -cleanup {
+    close $r
+    close $w
+} -result {{0 2} 1 {set ::userHandler 1}}
+
+test poll-3.2 {mixed sockets and channels} -setup $setup -body {
+    lassign [chan pipe] r w
+    set s [zmq::socket $ctx ZMQ_PAIR]
+    after 20 [list puts -nonewline $w x]
+    after 20 [list flush $w]
+    zmq::poll [list [list $s POLLIN] [list $r POLLIN]] 2000
+} -cleanup {
+    zmq::ctx_term $ctx
+    close $r
+    close $w
+} -result {0 1}
+
+test poll-4.1 {invalid items} -setup $setup -body {
+    lassign [chan pipe] r w
+    list [zmqerr {zmq::poll {{nosuch POLLIN}} 0}] [zmqerr {zmq::poll {justone} 0}] \
+        [zmqerr {zmq::poll [list [list $r POLLOUT]] 0}] [zmqerr {zmq::poll {} abc}]
+} -cleanup {
+    zmq::ctx_term $ctx
+    close $r
+    close $w
+} -result {{ZMQ ENOTSOCK} {ZMQ EINVAL} {ZMQ EINVAL} {ZMQ EINVAL}}
+
+cleanupTests

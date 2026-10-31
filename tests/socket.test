@@ -1,0 +1,82 @@
+source [file join [file dirname [file normalize [info script]]] setup.tcl]
+
+set setup {set ctx [zmq::ctx_new]}
+set cleanup {zmq::ctx_term $ctx}
+
+test socket-1.1 {create socket and query type} -setup $setup -body {
+    zmq::getsockopt [zmq::socket $ctx ZMQ_ROUTER] ZMQ_TYPE
+} -cleanup $cleanup -result 6
+
+test socket-1.2 {invalid socket type} -setup $setup -body {
+    zmqerr {zmq::socket $ctx 99}
+} -cleanup $cleanup -result {ZMQ EINVAL}
+
+test socket-1.3 {double close} -setup $setup -body {
+    set s [zmq::socket $ctx ZMQ_REQ]
+    zmq::close $s
+    zmqerr {zmq::close $s}
+} -cleanup $cleanup -result {ZMQ ENOTSOCK}
+
+test socket-2.1 {option defaults} -setup $setup -body {
+    set s [zmq::socket $ctx ZMQ_DEALER]
+    list [zmq::getsockopt $s ZMQ_SNDHWM] [zmq::getsockopt $s ZMQ_RCVHWM] \
+        [zmq::getsockopt $s ZMQ_RCVMORE] [zmq::getsockopt $s ZMQ_MECHANISM]
+} -cleanup $cleanup -result {1000 1000 0 0}
+
+test socket-2.2 {setsockopt roundtrip} -setup $setup -body {
+    set s [zmq::socket $ctx ZMQ_DEALER]
+    zmq::setsockopt $s ZMQ_LINGER 0
+    zmq::setsockopt $s ZMQ_ROUTING_ID "kernel-1"
+    list [zmq::getsockopt $s ZMQ_LINGER] [zmq::getsockopt $s ZMQ_ROUTING_ID]
+} -cleanup $cleanup -result {0 kernel-1}
+
+test socket-2.3 {read-only option} -setup $setup -body {
+    zmqerr {zmq::setsockopt [zmq::socket $ctx ZMQ_REQ] ZMQ_TYPE 1}
+} -cleanup $cleanup -result {ZMQ EINVAL}
+
+test socket-2.4 {write-only option} -setup $setup -body {
+    zmqerr {zmq::getsockopt [zmq::socket $ctx ZMQ_SUB] ZMQ_SUBSCRIBE}
+} -cleanup $cleanup -result {ZMQ EINVAL}
+
+test socket-2.5 {int option rejects non-integer} -setup $setup -body {
+    zmqerr {zmq::setsockopt [zmq::socket $ctx ZMQ_REQ] ZMQ_LINGER forever}
+} -cleanup $cleanup -result {ZMQ EINVAL}
+
+test socket-3.1 {subscribe only on SUB/XSUB} -setup $setup -body {
+    zmqerr {zmq::setsockopt [zmq::socket $ctx ZMQ_REQ] ZMQ_SUBSCRIBE ""}
+} -cleanup $cleanup -result {ZMQ EINVAL}
+
+test socket-3.2 {subscribe/unsubscribe} -setup $setup -body {
+    set s [zmq::socket $ctx ZMQ_SUB]
+    zmq::setsockopt $s ZMQ_SUBSCRIBE a
+    zmq::setsockopt $s ZMQ_SUBSCRIBE b
+    zmq::setsockopt $s ZMQ_UNSUBSCRIBE a
+    dict get $zmq::sockets($s) subscriptions
+} -cleanup $cleanup -result b
+
+test socket-4.1 {endpoint parsing: tcp} {
+    zmq::ParseEndpoint tcp://127.0.0.1:5555
+} {transport tcp host 127.0.0.1 port 5555}
+
+test socket-4.2 {endpoint parsing: wildcard and ipv6} {
+    list [zmq::ParseEndpoint tcp://*:*] [dict get [zmq::ParseEndpoint {tcp://[::1]:80}] host]
+} {{transport tcp host * port *} ::1}
+
+test socket-4.3 {endpoint parsing: errors} {
+    list [zmqerr {zmq::ParseEndpoint pgm://x}] \
+        [zmqerr {zmq::ParseEndpoint tcp://host}] \
+        [zmqerr {zmq::ParseEndpoint tcp://host:70000}] \
+        [zmqerr {zmq::ParseEndpoint garbage}]
+} {{ZMQ EPROTONOSUPPORT} {ZMQ EINVAL} {ZMQ EINVAL} {ZMQ EINVAL}}
+
+test socket-5.1 {send after shutdown fails with ETERM} -setup $setup -body {
+    set s [zmq::socket $ctx ZMQ_DEALER]
+    zmq::ctx_shutdown $ctx
+    zmqerr {zmq::send $s hello}
+} -cleanup $cleanup -result {ZMQ ETERM}
+
+test socket-5.2 {invalid send flags} -setup $setup -body {
+    zmqerr {zmq::send [zmq::socket $ctx ZMQ_DEALER] hello 8}
+} -cleanup $cleanup -result {ZMQ EINVAL}
+
+cleanupTests

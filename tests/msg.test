@@ -1,0 +1,44 @@
+source [file join [file dirname [file normalize [info script]]] setup.tcl]
+
+test msg-1.1 {msg_init is empty} -body {
+    set m [zmq::msg_init]
+    list [zmq::msg_size $m] [zmq::msg_more $m] [zmq::msg_get $m ZMQ_MORE]
+} -cleanup {zmq::msg_close $m} -result {0 0 0}
+
+test msg-1.2 {msg_init_size is zero filled} -body {
+    set m [zmq::msg_init_size 4]
+    binary scan [zmq::msg_data $m] H* hex
+    set hex
+} -cleanup {zmq::msg_close $m} -result 00000000
+
+test msg-1.3 {msg_init_data} -body {
+    set m [zmq::msg_init_data hello]
+    list [zmq::msg_data $m] [zmq::msg_size $m]
+} -cleanup {zmq::msg_close $m} -result {hello 5}
+
+test msg-2.1 {msg_copy} -body {
+    set a [zmq::msg_init_data abc]
+    set b [zmq::msg_init]
+    zmq::msg_copy $b $a
+    list [zmq::msg_data $a] [zmq::msg_data $b]
+} -cleanup {zmq::msg_close $a; zmq::msg_close $b} -result {abc abc}
+
+test msg-2.2 {msg_move empties source} -body {
+    set a [zmq::msg_init_data abc]
+    set b [zmq::msg_init]
+    zmq::msg_move $b $a
+    list [zmq::msg_size $a] [zmq::msg_data $b]
+} -cleanup {zmq::msg_close $a; zmq::msg_close $b} -result {0 abc}
+
+test msg-3.1 {closed message is invalid} {
+    set m [zmq::msg_init]
+    zmq::msg_close $m
+    zmqerr {zmq::msg_size $m}
+} {ZMQ EFAULT}
+
+test msg-3.2 {unknown metadata property} -body {
+    set m [zmq::msg_init]
+    zmqerr {zmq::msg_gets $m Socket-Type}
+} -cleanup {zmq::msg_close $m} -result {ZMQ EINVAL}
+
+cleanupTests

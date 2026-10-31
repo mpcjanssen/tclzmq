@@ -1,0 +1,112 @@
+# Wire-level interoperability against libzmq via pyzmq.
+source [file join [file dirname [file normalize [info script]]] setup.tcl]
+
+# Start a python peer running $script; it must print the bound port on stdout.
+proc startPeer {script} {
+    set chan [open |[list $::python -u -c $script] r]
+    gets $chan port
+    return [list $chan $port]
+}
+
+proc stopPeer {chan} {
+    catch {exec kill [pid $chan]}
+    catch {close $chan}
+}
+
+# Engine-level tests: attach a raw TCP channel until the tcp transport exists.
+test interop-0.1 {DEALER handshake and multipart with libzmq} -constraints pyzmq -setup {
+    lassign [startPeer {
+import zmq
+s = zmq.Context().socket(zmq.DEALER)
+s.setsockopt(zmq.ROUTING_ID, b"py")
+print(s.bind_to_random_port("tcp://127.0.0.1"))
+s.send_multipart([f[::-1] for f in s.recv_multipart()])
+print(s.recv())
+}] chan port
+    set ctx [zmq::ctx_new]
+} -body {
+    set s [zmq::socket $ctx ZMQ_DEALER]
+    zmq::Attach $s [::socket 127.0.0.1 $port]
+    zmq::send $s abc ZMQ_SNDMORE
+    zmq::send $s def
+    set m [zmq::msg_init]
+    zmq::msg_recv $m $s
+    set r [list [zmq::msg_data $m] [zmq::getsockopt $s ZMQ_RCVMORE] [zmq::recv $s] \
+        [zmq::msg_gets $m Socket-Type] [zmq::msg_gets $m Identity]]
+    zmq::send $s [string repeat x 300]
+    lappend r [string length [gets $chan]]
+} -cleanup {
+    zmq::ctx_term $ctx
+    stopPeer $chan
+} -result {cba 1 fed DEALER py 303}
+
+test interop-0.2 {libzmq PUSH to Tcl PULL} -constraints pyzmq -setup {
+    lassign [startPeer {
+import zmq
+s = zmq.Context().socket(zmq.PUSH)
+print(s.bind_to_random_port("tcp://127.0.0.1"))
+for i in range(100): s.send(str(i).encode())
+s.close(linger=1000)
+}] chan port
+    set ctx [zmq::ctx_new]
+} -body {
+    set s [zmq::socket $ctx ZMQ_PULL]
+    zmq::Attach $s [::socket 127.0.0.1 $port]
+    set r {}
+    for {set i 0} {$i < 100} {incr i} {
+        lappend r [zmq::recv $s]
+    }
+    expr {$r eq [lsearch -all [lrepeat 100 x] x]}
+} -cleanup {
+    zmq::ctx_term $ctx
+    stopPeer $chan
+} -result 1
+
+test interop-1.1 {Tcl REQ talks to libzmq REP} -constraints {pyzmq tcpTransport} -setup {
+    lassign [startPeer {
+import zmq
+s = zmq.Context().socket(zmq.REP)
+print(s.bind_to_random_port("tcp://127.0.0.1"))
+s.send(s.recv()[::-1])
+}] chan port
+    set ctx [zmq::ctx_new]
+} -body {
+    set s [zmq::socket $ctx ZMQ_REQ]
+    zmq::connect $s tcp://127.0.0.1:$port
+    zmq::send $s hello
+    zmq::recv $s
+} -cleanup {
+    zmq::ctx_term $ctx
+    catch {stopPeer $chan}
+    unset -nocomplain chan
+} -result olleh
+
+test interop-1.2 {Tcl ROUTER receives routing id from libzmq DEALER (Jupyter shell)} -constraints {pyzmq tcpTransport} -setup {
+    set ctx [zmq::ctx_new]
+    set s [zmq::socket $ctx ZMQ_ROUTER]
+    zmq::bind $s tcp://127.0.0.1:*
+    regexp {:(\d+)$} [zmq::getsockopt $s ZMQ_LAST_ENDPOINT] -> port
+    set chan [open |[list $::python -u -c [string map [list @PORT@ $port] {
+import zmq
+s = zmq.Context().socket(zmq.DEALER)
+s.setsockopt(zmq.ROUTING_ID, b"client")
+s.connect("tcp://127.0.0.1:@PORT@")
+s.send_multipart([b"<IDS|MSG>", b"body"])
+print(s.recv_multipart())
+}]] r]
+} -body {
+    set frames {}
+    lappend frames [zmq::recv $s]
+    while {[zmq::getsockopt $s ZMQ_RCVMORE]} {
+        lappend frames [zmq::recv $s]
+    }
+    zmq::send $s client ZMQ_SNDMORE
+    zmq::send $s reply
+    list $frames [gets $chan]
+} -cleanup {
+    zmq::ctx_term $ctx
+    catch {stopPeer $chan}
+    unset -nocomplain chan
+} -result {{client <IDS|MSG> body} {[b'reply']}}
+
+cleanupTests

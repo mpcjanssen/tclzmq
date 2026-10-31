@@ -1,0 +1,66 @@
+source [file join [file dirname [file normalize [info script]]] setup.tcl]
+
+set setup {set ctx [zmq::ctx_new]}
+set cleanup {zmq::ctx_term $ctx}
+
+test multipart-1.1 {roundtrip} -setup $setup -body {
+    set a [zmq::socket $ctx ZMQ_DEALER]
+    set b [zmq::socket $ctx ZMQ_DEALER]
+    pipePair $a $b
+    set n [zmq::send_multipart $a {one {} three}]
+    list $n [zmq::recv_multipart $b] [zmq::getsockopt $b ZMQ_RCVMORE]
+} -cleanup $cleanup -result {8 {one {} three} 0}
+
+test multipart-1.2 {single frame message is a one element list} -setup $setup -body {
+    set a [zmq::socket $ctx ZMQ_PAIR]
+    set b [zmq::socket $ctx ZMQ_PAIR]
+    pipePair $a $b
+    zmq::send $a {hello world}
+    zmq::recv_multipart $b
+} -cleanup $cleanup -result {{hello world}}
+
+test multipart-1.3 {returns the remaining frames after a partial recv} -setup $setup -body {
+    set a [zmq::socket $ctx ZMQ_PAIR]
+    set b [zmq::socket $ctx ZMQ_PAIR]
+    pipePair $a $b
+    zmq::send_multipart $a {x y z}
+    list [zmq::recv $b] [zmq::recv_multipart $b]
+} -cleanup $cleanup -result {x {y z}}
+
+test multipart-1.4 {ROUTER envelope} -setup $setup -body {
+    set r [zmq::socket $ctx ZMQ_ROUTER]
+    set d [zmq::socket $ctx ZMQ_DEALER]
+    zmq::setsockopt $d ZMQ_ROUTING_ID client
+    pipePair $r $d
+    zmq::send_multipart $d {<IDS|MSG> body}
+    set in [zmq::recv_multipart $r]
+    zmq::send_multipart $r [list [lindex $in 0] reply]
+    list $in [zmq::recv_multipart $d]
+} -cleanup $cleanup -result {{client <IDS|MSG> body} reply}
+
+test multipart-2.1 {DONTWAIT on an empty socket} -setup $setup -body {
+    zmqerr {zmq::recv_multipart [zmq::socket $ctx ZMQ_PAIR] ZMQ_DONTWAIT}
+} -cleanup $cleanup -result {ZMQ EAGAIN}
+
+test multipart-2.2 {DONTWAIT send without peer sends nothing} -setup $setup -body {
+    set s [zmq::socket $ctx ZMQ_PAIR]
+    list [zmqerr {zmq::send_multipart $s {a b} ZMQ_DONTWAIT}] \
+        [dict get $::zmq::sockets($s) outconn]
+} -cleanup $cleanup -result {{ZMQ EAGAIN} {}}
+
+test multipart-2.3 {invalid frames are rejected before anything is sent} -setup $setup -body {
+    set a [zmq::socket $ctx ZMQ_PAIR]
+    set b [zmq::socket $ctx ZMQ_PAIR]
+    pipePair $a $b
+    set r [list [zmqerr {zmq::send_multipart $a [list ok "\u20ac"]}] \
+        [zmqerr {zmq::send_multipart $a {}}]]
+    zmq::send_multipart $a {next}
+    lappend r [zmq::recv_multipart $b]
+} -cleanup $cleanup -result {{ZMQ EINVAL} {ZMQ EINVAL} next}
+
+test multipart-2.4 {direction checks} -setup $setup -body {
+    list [zmqerr {zmq::send_multipart [zmq::socket $ctx ZMQ_SUB] {a}}] \
+        [zmqerr {zmq::recv_multipart [zmq::socket $ctx ZMQ_PUB]}]
+} -cleanup $cleanup -result {{ZMQ ENOTSUP} {ZMQ ENOTSUP}}
+
+cleanupTests

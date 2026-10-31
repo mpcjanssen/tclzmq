@@ -1,0 +1,126 @@
+source [file join [file dirname [file normalize [info script]]] setup.tcl]
+
+proc pipes {socket} {
+    llength [dict get $::zmq::sockets($socket) pipes]
+}
+
+proc boundPort {socket} {
+    lindex [split [zmq::getsockopt $socket ZMQ_LAST_ENDPOINT] :] end
+}
+
+set setup {set ctx [zmq::ctx_new]}
+set cleanup {zmq::ctx_term $ctx}
+
+test tcp-1.1 {bind to an ephemeral port sets LAST_ENDPOINT} -setup $setup -body {
+    set s [zmq::socket $ctx ZMQ_PULL]
+    zmq::bind $s tcp://127.0.0.1:*
+    regexp {^tcp://127\.0\.0\.1:[1-9][0-9]*$} [zmq::getsockopt $s ZMQ_LAST_ENDPOINT]
+} -cleanup $cleanup -result 1
+
+test tcp-1.2 {wildcard host binds all IPv4 interfaces} -setup $setup -body {
+    set s [zmq::socket $ctx ZMQ_PULL]
+    zmq::bind $s tcp://*:*
+    string match tcp://0.0.0.0:* [zmq::getsockopt $s ZMQ_LAST_ENDPOINT]
+} -cleanup $cleanup -result 1
+
+test tcp-1.3 {port already in use} -setup $setup -body {
+    set a [zmq::socket $ctx ZMQ_PULL]
+    set b [zmq::socket $ctx ZMQ_PULL]
+    zmq::bind $a tcp://127.0.0.1:*
+    zmqerr {zmq::bind $b tcp://127.0.0.1:[boundPort $a]}
+} -cleanup $cleanup -result {ZMQ EADDRINUSE}
+
+test tcp-1.4 {unknown host} -setup $setup -body {
+    zmqerr {zmq::bind [zmq::socket $ctx ZMQ_PULL] tcp://no-such-host.invalid:*}
+} -cleanup $cleanup -result {ZMQ ENODEV}
+
+test tcp-1.5 {bind after shutdown} -setup $setup -body {
+    set s [zmq::socket $ctx ZMQ_PULL]
+    zmq::ctx_shutdown $ctx
+    zmqerr {zmq::bind $s tcp://127.0.0.1:*}
+} -cleanup $cleanup -result {ZMQ ETERM}
+
+test tcp-2.1 {accepted connections exchange messages} -setup $setup -body {
+    set a [zmq::socket $ctx ZMQ_PAIR]
+    set b [zmq::socket $ctx ZMQ_PAIR]
+    zmq::bind $a tcp://127.0.0.1:*
+    zmq::Attach $b [::socket 127.0.0.1 [boundPort $a]]
+    zmq::send $b hello
+    set m [zmq::msg_init]
+    zmq::msg_recv $m $a
+    zmq::send $a world
+    list [zmq::msg_data $m] [zmq::msg_gets $m Peer-Address] [zmq::recv $b]
+} -cleanup $cleanup -result {hello 127.0.0.1 world}
+
+test tcp-2.2 {multiple peers on one endpoint} -setup $setup -body {
+    set a [zmq::socket $ctx ZMQ_PULL]
+    zmq::bind $a tcp://127.0.0.1:*
+    foreach i {1 2 3} {
+        set p [zmq::socket $ctx ZMQ_PUSH]
+        zmq::Attach $p [::socket 127.0.0.1 [boundPort $a]]
+        zmq::send $p $i
+    }
+    lsort [list [zmq::recv $a] [zmq::recv $a] [zmq::recv $a]]
+} -cleanup $cleanup -result {1 2 3}
+
+test tcp-3.1 {unbind frees the port and drops its connections} -setup $setup -body {
+    set a [zmq::socket $ctx ZMQ_PAIR]
+    set b [zmq::socket $ctx ZMQ_PAIR]
+    zmq::bind $a tcp://127.0.0.1:*
+    set port [boundPort $a]
+    zmq::Attach $b [::socket 127.0.0.1 $port]
+    zmq::send $b x
+    zmq::recv $a
+    zmq::unbind $a [zmq::getsockopt $a ZMQ_LAST_ENDPOINT]
+    set dropped [waitFor {[pipes $a] == 0 && [pipes $b] == 0}]
+    set c [zmq::socket $ctx ZMQ_PAIR]
+    zmq::bind $c tcp://127.0.0.1:$port
+    list $dropped [dict size [dict get $::zmq::sockets($a) endpoints]]
+} -cleanup $cleanup -result {1 0}
+
+test tcp-3.2 {unbind by the original endpoint string} -setup $setup -body {
+    set a [zmq::socket $ctx ZMQ_PULL]
+    set b [zmq::socket $ctx ZMQ_PULL]
+    zmq::bind $a tcp://127.0.0.1:*
+    set port [boundPort $a]
+    zmq::unbind $a [zmq::getsockopt $a ZMQ_LAST_ENDPOINT]
+    zmq::bind $b tcp://localhost:$port
+    zmq::unbind $b tcp://localhost:$port
+} -cleanup $cleanup -result {}
+
+test tcp-3.3 {unbind of wildcard or unknown endpoint} -setup $setup -body {
+    set a [zmq::socket $ctx ZMQ_PULL]
+    zmq::bind $a tcp://127.0.0.1:*
+    list [zmqerr {zmq::unbind $a tcp://127.0.0.1:*}] [zmqerr {zmq::unbind $a tcp://127.0.0.1:1}]
+} -cleanup $cleanup -result {{ZMQ ENOENT} {ZMQ ENOENT}}
+
+test tcp-3.4 {close stops the listener} -setup $setup -body {
+    set a [zmq::socket $ctx ZMQ_PULL]
+    zmq::bind $a tcp://127.0.0.1:*
+    set port [boundPort $a]
+    zmq::close $a
+    list [catch {::close [::socket 127.0.0.1 $port]}] [array size ::zmq::listenerKeys]
+} -cleanup $cleanup -result {1 0}
+
+test tcp-4.1 {libzmq PUSH connects to Tcl PULL} -constraints pyzmq -setup $setup -body {
+    set s [zmq::socket $ctx ZMQ_PULL]
+    zmq::bind $s tcp://127.0.0.1:*
+    set chan [open |[list $::python -u -c {
+import sys, zmq
+s = zmq.Context().socket(zmq.PUSH)
+s.connect(sys.argv[1])
+for i in range(50): s.send(str(i).encode())
+s.close(linger=2000)
+} [zmq::getsockopt $s ZMQ_LAST_ENDPOINT]] r]
+    set r {}
+    for {set i 0} {$i < 50} {incr i} {
+        lappend r [zmq::recv $s]
+    }
+    expr {$r eq [lsearch -all [lrepeat 50 x] x]}
+} -cleanup {
+    catch {exec kill [pid $chan]}
+    catch {close $chan}
+    zmq::ctx_term $ctx
+} -result 1
+
+cleanupTests

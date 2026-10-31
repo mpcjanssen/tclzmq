@@ -1,0 +1,50 @@
+source [file join [file dirname [file normalize [info script]]] setup.tcl]
+
+test constants-1.1 {socket type values match zmq.h} {
+    list [zmq::const ZMQ_PAIR] [zmq::const ZMQ_REQ] [zmq::const ZMQ_ROUTER] [zmq::const ZMQ_STREAM]
+} {0 3 6 11}
+
+test constants-1.2 {unknown constant} {
+    zmqerr {zmq::const ZMQ_BOGUS}
+} {ZMQ EINVAL}
+
+test constants-2.1 {flags are OR-ed} {
+    zmq::ToInt {ZMQ_SNDMORE ZMQ_DONTWAIT}
+} 3
+
+test constants-2.2 {integers pass through} {
+    zmq::ToInt 42
+} 42
+
+test constants-2.3 {Tcl-style names} {
+    list [zmq::ToInt -io_threads] [zmq::ToInt io_threads] [zmq::ToInt IO_THREADS] \
+        [zmq::ToInt {-sndmore -dontwait}] [zmq::const -router]
+} {1 1 1 3 6}
+
+test constants-2.4 {unknown name is reported} {
+    list [catch {zmq::ToInt -bogus} msg] $msg $::errorCode
+} {1 {unknown constant "-bogus"} {ZMQ EINVAL}}
+
+test constants-2.5 {ctx_set with Tcl-style option} -setup {set ctx [zmq::ctx_new]} -body {
+    zmq ctx_set $ctx -io_threads 2
+    zmq ctx_get $ctx -io_threads
+} -cleanup {zmq::ctx_term $ctx} -result 2
+
+test constants-3.1 {version} {
+    llength [zmq::version]
+} 3
+
+test constants-3.2 {ensemble form} {
+    zmq const ZMQ_PUB
+} 1
+
+test error-1.1 {strerror} {
+    zmq::strerror EAGAIN
+} {Resource temporarily unavailable}
+
+test error-1.2 {errno is set on failure} {
+    catch {zmq::const ZMQ_BOGUS}
+    zmq::errno
+} EINVAL
+
+cleanupTests

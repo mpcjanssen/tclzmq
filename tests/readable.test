@@ -1,0 +1,95 @@
+source [file join [file dirname [file normalize [info script]]] setup.tcl]
+
+set setup {set ctx [zmq::ctx_new]; set ::got {}}
+set cleanup {zmq::ctx_term $ctx}
+
+test readable-1.1 {query, set and clear the handler} -setup $setup -body {
+    set s [zmq::socket $ctx ZMQ_PAIR]
+    set r [list [zmq::readable $s]]
+    zmq::readable $s {puts hi}
+    lappend r [zmq::readable $s]
+    zmq::readable $s {}
+    lappend r [zmq::readable $s]
+} -cleanup $cleanup -result {{} {puts hi} {}}
+
+test readable-1.2 {handler fires once per message, at global level} -setup $setup -body {
+    set a [zmq::socket $ctx ZMQ_PAIR]
+    set b [zmq::socket $ctx ZMQ_PAIR]
+    pipePair $a $b
+    zmq::readable $a [list apply {{s} {lappend ::got [zmq::recv $s] [info level]}} $a]
+    foreach m {one two three} {zmq::send $b $m}
+    waitFor {[llength $::got] == 6}
+    set ::got
+} -cleanup $cleanup -result {one 1 two 1 three 1}
+
+test readable-1.3 {messages queued before registration are reported} -setup $setup -body {
+    set a [zmq::socket $ctx ZMQ_PAIR]
+    set b [zmq::socket $ctx ZMQ_PAIR]
+    pipePair $a $b
+    zmq::send $b early
+    waitFor {[zmq::getsockopt $a ZMQ_EVENTS] & 1}
+    zmq::readable $a [list apply {{s} {lappend ::got [zmq::recv $s]}} $a]
+    waitFor {[llength $::got] == 1}
+    set ::got
+} -cleanup $cleanup -result early
+
+test readable-1.4 {level-triggered: fires for each frame of a multipart message} -setup $setup -body {
+    set a [zmq::socket $ctx ZMQ_PAIR]
+    set b [zmq::socket $ctx ZMQ_PAIR]
+    pipePair $a $b
+    zmq::readable $a [list apply {{s} {lappend ::got [zmq::recv $s] [zmq::getsockopt $s ZMQ_RCVMORE]}} $a]
+    zmq::send $b x ZMQ_SNDMORE
+    zmq::send $b y
+    waitFor {[llength $::got] == 4}
+    set ::got
+} -cleanup $cleanup -result {x 1 y 0}
+
+test readable-1.5 {no calls after the handler is removed} -setup $setup -body {
+    set a [zmq::socket $ctx ZMQ_PAIR]
+    set b [zmq::socket $ctx ZMQ_PAIR]
+    pipePair $a $b
+    zmq::readable $a {lappend ::got called}
+    zmq::readable $a {}
+    zmq::send $b x
+    waitFor {[zmq::getsockopt $a ZMQ_EVENTS] & 1}
+    after 20 {set ::tick 1}
+    vwait ::tick
+    set ::got
+} -cleanup $cleanup -result {}
+
+test readable-1.6 {an error removes the handler and goes to bgerror} -setup $setup -body {
+    set a [zmq::socket $ctx ZMQ_PAIR]
+    set b [zmq::socket $ctx ZMQ_PAIR]
+    pipePair $a $b
+    set old [interp bgerror {}]
+    interp bgerror {} {apply {{msg opts} {lappend ::got $msg}}}
+    zmq::readable $a {error boom}
+    zmq::send $b x
+    waitFor {[llength $::got] == 1}
+    interp bgerror {} $old
+    list $::got [zmq::readable $a]
+} -cleanup $cleanup -result {boom {}}
+
+test readable-2.1 {send-only sockets} -setup $setup -body {
+    zmqerr {zmq::readable [zmq::socket $ctx ZMQ_PUSH] {puts x}}
+} -cleanup $cleanup -result {ZMQ ENOTSUP}
+
+test readable-2.2 {invalid socket and arguments} -setup $setup -body {
+    set s [zmq::socket $ctx ZMQ_PAIR]
+    list [zmqerr {zmq::readable nosuch}] [catch {zmq::readable $s a b} msg] $msg
+} -cleanup $cleanup -result {{ZMQ ENOTSOCK} 1 {wrong # args: should be "zmq::readable socket ?script?"}}
+
+test readable-2.3 {close cancels a pending callback} -setup $setup -body {
+    set a [zmq::socket $ctx ZMQ_PAIR]
+    set b [zmq::socket $ctx ZMQ_PAIR]
+    pipePair $a $b
+    zmq::send $b x
+    waitFor {[zmq::getsockopt $a ZMQ_EVENTS] & 1}
+    zmq::readable $a {lappend ::got called}
+    zmq::close $a
+    after 20 {set ::tick 1}
+    vwait ::tick
+    set ::got
+} -cleanup $cleanup -result {}
+
+cleanupTests

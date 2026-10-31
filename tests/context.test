@@ -1,0 +1,49 @@
+source [file join [file dirname [file normalize [info script]]] setup.tcl]
+
+test context-1.1 {ctx_new returns a handle} -body {
+    set ctx [zmq::ctx_new]
+    string match zmqctx* $ctx
+} -cleanup {zmq::ctx_term $ctx} -result 1
+
+test context-2.1 {ctx_get defaults} -setup {set ctx [zmq::ctx_new]} -body {
+    list [zmq::ctx_get $ctx ZMQ_IO_THREADS] [zmq::ctx_get $ctx ZMQ_MAX_SOCKETS]
+} -cleanup {zmq::ctx_term $ctx} -result {1 1023}
+
+test context-2.2 {ctx_set roundtrip} -setup {set ctx [zmq::ctx_new]} -body {
+    zmq::ctx_set $ctx ZMQ_MAX_SOCKETS 10
+    zmq::ctx_get $ctx ZMQ_MAX_SOCKETS
+} -cleanup {zmq::ctx_term $ctx} -result 10
+
+test context-2.3 {ctx_set read-only option} -setup {set ctx [zmq::ctx_new]} -body {
+    zmqerr {zmq::ctx_set $ctx ZMQ_SOCKET_LIMIT 10}
+} -cleanup {zmq::ctx_term $ctx} -result {ZMQ EINVAL}
+
+test context-2.4 {ctx_set non-integer} -setup {set ctx [zmq::ctx_new]} -body {
+    zmqerr {zmq::ctx_set $ctx ZMQ_IO_THREADS abc}
+} -cleanup {zmq::ctx_term $ctx} -result {ZMQ EINVAL}
+
+test context-3.1 {terminated context is invalid} -body {
+    set ctx [zmq::ctx_new]
+    zmq::ctx_term $ctx
+    list [zmqerr {zmq::ctx_get $ctx ZMQ_IO_THREADS}] [catch {zmq::ctx_get bogus ZMQ_IO_THREADS} msg] $msg
+} -result {{ZMQ EFAULT} 1 {invalid or terminated context "bogus"}}
+
+test context-3.2 {ctx_term closes sockets} -body {
+    set ctx [zmq::ctx_new]
+    set s [zmq::socket $ctx ZMQ_REQ]
+    zmq::ctx_term $ctx
+    zmqerr {zmq::getsockopt $s ZMQ_TYPE}
+} -result {ZMQ ENOTSOCK}
+
+test context-3.3 {no new sockets after shutdown} -setup {set ctx [zmq::ctx_new]} -body {
+    zmq::ctx_shutdown $ctx
+    zmqerr {zmq::socket $ctx ZMQ_REQ}
+} -cleanup {zmq::ctx_term $ctx} -result {ZMQ ETERM}
+
+test context-3.4 {MAX_SOCKETS is enforced} -setup {set ctx [zmq::ctx_new]} -body {
+    zmq::ctx_set $ctx ZMQ_MAX_SOCKETS 1
+    zmq::socket $ctx ZMQ_REQ
+    zmqerr {zmq::socket $ctx ZMQ_REQ}
+} -cleanup {zmq::ctx_term $ctx} -result {ZMQ EMFILE}
+
+cleanupTests

@@ -1,0 +1,188 @@
+source [file join [file dirname [file normalize [info script]]] setup.tcl]
+
+# Subscriptions a PUB/XPUB socket has received from its peers.
+proc peerSubs {pub} {
+    set subs {}
+    foreach p [dict get $::zmq::sockets($pub) pipes] {
+        lappend subs {*}[dict get $::zmq::conns($p) subs]
+    }
+    return $subs
+}
+
+proc drain {s} {
+    set r {}
+    while {![catch {zmq::recv $s ZMQ_DONTWAIT} m]} {
+        lappend r $m
+    }
+    return $r
+}
+
+set setup {set ctx [zmq::ctx_new]}
+set cleanup {zmq::ctx_term $ctx}
+
+test pubsub-1.1 {prefix filtering} -setup $setup -body {
+    set pub [zmq::socket $ctx ZMQ_PUB]
+    set sub [zmq::socket $ctx ZMQ_SUB]
+    zmq::setsockopt $sub ZMQ_SUBSCRIBE a
+    pipePair $pub $sub
+    waitFor {[peerSubs $pub] eq "a"}
+    foreach m {abc xyz a ab b} {zmq::send $pub $m}
+    zmq::send $pub end-marker-not-received
+    zmq::setsockopt $sub ZMQ_SUBSCRIBE end
+    waitFor {[llength [peerSubs $pub]] == 2}
+    zmq::send $pub end
+    set r {}
+    while {[set m [zmq::recv $sub]] ne "end"} {lappend r $m}
+    set r
+} -cleanup $cleanup -result {abc a ab}
+
+test pubsub-1.2 {empty subscription receives everything, multipart intact} -setup $setup -body {
+    set pub [zmq::socket $ctx ZMQ_PUB]
+    set sub [zmq::socket $ctx ZMQ_SUB]
+    pipePair $pub $sub
+    zmq::setsockopt $sub ZMQ_SUBSCRIBE ""
+    waitFor {[llength [peerSubs $pub]] == 1}
+    zmq::send $pub topic ZMQ_SNDMORE
+    zmq::send $pub body
+    list [zmq::recv $sub] [zmq::getsockopt $sub ZMQ_RCVMORE] [zmq::recv $sub]
+} -cleanup $cleanup -result {topic 1 body}
+
+test pubsub-1.3 {unsubscribe stops delivery} -setup $setup -body {
+    set pub [zmq::socket $ctx ZMQ_PUB]
+    set sub [zmq::socket $ctx ZMQ_SUB]
+    zmq::setsockopt $sub ZMQ_SUBSCRIBE a
+    zmq::setsockopt $sub ZMQ_SUBSCRIBE b
+    pipePair $pub $sub
+    waitFor {[llength [peerSubs $pub]] == 2}
+    zmq::setsockopt $sub ZMQ_UNSUBSCRIBE a
+    waitFor {[peerSubs $pub] eq "b"}
+    zmq::send $pub a1
+    zmq::send $pub b1
+    zmq::recv $sub
+} -cleanup $cleanup -result b1
+
+test pubsub-1.4 {fan-out to all matching subscribers} -setup $setup -body {
+    set pub [zmq::socket $ctx ZMQ_PUB]
+    set s1 [zmq::socket $ctx ZMQ_SUB]
+    set s2 [zmq::socket $ctx ZMQ_SUB]
+    zmq::setsockopt $s1 ZMQ_SUBSCRIBE ""
+    zmq::setsockopt $s2 ZMQ_SUBSCRIBE ""
+    pipePair $pub $s1
+    pipePair $pub $s2
+    waitFor {[llength [peerSubs $pub]] == 2}
+    zmq::send $pub news
+    list [zmq::recv $s1] [zmq::recv $s2]
+} -cleanup $cleanup -result {news news}
+
+test pubsub-1.5 {PUB without subscribers drops and never blocks} -setup $setup -body {
+    set pub [zmq::socket $ctx ZMQ_PUB]
+    list [zmq::send $pub dropped] [zmq::getsockopt $pub ZMQ_EVENTS]
+} -cleanup $cleanup -result {7 2}
+
+test pubsub-2.1 {XPUB reports subscriptions and cancels} -setup $setup -body {
+    set xpub [zmq::socket $ctx ZMQ_XPUB]
+    set s1 [zmq::socket $ctx ZMQ_SUB]
+    set s2 [zmq::socket $ctx ZMQ_SUB]
+    zmq::setsockopt $s1 ZMQ_SUBSCRIBE iopub
+    zmq::setsockopt $s2 ZMQ_SUBSCRIBE iopub
+    pipePair $xpub $s1
+    pipePair $xpub $s2
+    waitFor {[llength [peerSubs $xpub]] == 2}
+    set r [list [drain $xpub]]
+    zmq::close $s1
+    waitFor {[llength [peerSubs $xpub]] == 1}
+    lappend r [drain $xpub]
+    zmq::close $s2
+    waitFor {[llength [peerSubs $xpub]] == 0}
+    lappend r [drain $xpub]
+} -cleanup $cleanup -result [list [list \x01iopub] {} [list \x00iopub]]
+
+test pubsub-2.2 {XPUB_VERBOSE reports every subscription} -setup $setup -body {
+    set xpub [zmq::socket $ctx ZMQ_XPUB]
+    zmq::setsockopt $xpub ZMQ_XPUB_VERBOSE 1
+    set s1 [zmq::socket $ctx ZMQ_SUB]
+    set s2 [zmq::socket $ctx ZMQ_SUB]
+    zmq::setsockopt $s1 ZMQ_SUBSCRIBE t
+    zmq::setsockopt $s2 ZMQ_SUBSCRIBE t
+    pipePair $xpub $s1
+    pipePair $xpub $s2
+    waitFor {[llength [peerSubs $xpub]] == 2}
+    drain $xpub
+} -cleanup $cleanup -result [list \x01t \x01t]
+
+test pubsub-2.3 {XSUB forwards subscription messages} -setup $setup -body {
+    set pub [zmq::socket $ctx ZMQ_PUB]
+    set xsub [zmq::socket $ctx ZMQ_XSUB]
+    pipePair $pub $xsub
+    waitFor {[zmq::getsockopt $xsub ZMQ_EVENTS] & 2}
+    zmq::send $xsub \x01k
+    waitFor {[peerSubs $pub] eq "k"}
+    zmq::send $pub other
+    zmq::send $pub key
+    zmq::recv $xsub
+} -cleanup $cleanup -result key
+
+test pubsub-3.1 {Tcl PUB to libzmq SUB} -constraints pyzmq -setup $setup -body {
+    set pub [zmq::socket $ctx ZMQ_PUB]
+    zmq::bind $pub tcp://127.0.0.1:*
+    set chan [open |[list $::python -u -c {
+import sys, zmq
+s = zmq.Context().socket(zmq.SUB)
+s.setsockopt(zmq.SUBSCRIBE, b"status")
+s.connect(sys.argv[1])
+print(s.recv_multipart())
+} [zmq::getsockopt $pub ZMQ_LAST_ENDPOINT]] r]
+    waitFor {[peerSubs $pub] eq "status"} 5000
+    zmq::send $pub other
+    zmq::send $pub status ZMQ_SNDMORE
+    zmq::send $pub idle
+    gets $chan
+} -cleanup {
+    catch {exec kill [pid $chan]}
+    catch {close $chan}
+    zmq::ctx_term $ctx
+} -result {[b'status', b'idle']}
+
+test pubsub-3.2 {libzmq PUB to Tcl SUB} -constraints pyzmq -setup $setup -body {
+    set chan [open |[list $::python -u -c {
+import time, zmq
+s = zmq.Context().socket(zmq.PUB)
+print(s.bind_to_random_port("tcp://127.0.0.1"), flush=True)
+for i in range(200):
+    s.send(b"b-%d" % i)
+    s.send(b"a-%d" % i)
+    time.sleep(0.02)
+}] r]
+    gets $chan port
+    set sub [zmq::socket $ctx ZMQ_SUB]
+    zmq::setsockopt $sub ZMQ_SUBSCRIBE a-
+    zmq::Attach $sub [::socket 127.0.0.1 $port]
+    set r {}
+    for {set i 0} {$i < 3} {incr i} {lappend r [string range [zmq::recv $sub] 0 1]}
+    set r
+} -cleanup {
+    catch {exec kill [pid $chan]}
+    catch {close $chan}
+    zmq::ctx_term $ctx
+} -result {a- a- a-}
+
+test pubsub-3.3 {libzmq SUB to Tcl XPUB (Jupyter iopub)} -constraints pyzmq -setup $setup -body {
+    set xpub [zmq::socket $ctx ZMQ_XPUB]
+    zmq::bind $xpub tcp://127.0.0.1:*
+    set chan [open |[list $::python -u -c {
+import sys, zmq
+s = zmq.Context().socket(zmq.SUB)
+s.setsockopt(zmq.SUBSCRIBE, b"")
+s.connect(sys.argv[1])
+print(s.recv())
+} [zmq::getsockopt $xpub ZMQ_LAST_ENDPOINT]] r]
+    set subscription [zmq::recv $xpub]
+    zmq::send $xpub welcome
+    list [expr {$subscription eq "\x01"}] [gets $chan]
+} -cleanup {
+    catch {exec kill [pid $chan]}
+    catch {close $chan}
+    zmq::ctx_term $ctx
+} -result {1 b'welcome'}
+
+cleanupTests

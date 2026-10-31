@@ -1,0 +1,227 @@
+source [file join [file dirname [file normalize [info script]]] setup.tcl]
+
+proc pipes {socket} {
+    llength [dict get $::zmq::sockets($socket) pipes]
+}
+
+proc readyPipes {socket} {
+    set n 0
+    foreach p [dict get $::zmq::sockets($socket) pipes] {
+        incr n [expr {[dict get $::zmq::conns($p) state] eq "ready"}]
+    }
+    return $n
+}
+
+# A zmq socket attached to raw channels driven by the test acting as peer.
+proc rawPeer {socket} {
+    lassign [chan pipe] zr rw
+    lassign [chan pipe] rr zw
+    fconfigure $rw -translation binary
+    zmq::Attach $socket $zr $zw
+    list $rr $rw
+}
+
+proc rawSend {chan bytes} {
+    puts -nonewline $chan $bytes
+    flush $chan
+}
+
+# Read one complete ZMTP frame from a raw channel.
+proc rawFrame {chan} {
+    set head [rawRead $chan 2]
+    binary scan $head cucu flags size
+    if {$flags & 2} {
+        append head [rawRead $chan 7]
+        binary scan $head x1Wu size
+    }
+    zmq::zmtp::parse_frame $head[rawRead $chan $size]
+}
+
+set setup {set ctx [zmq::ctx_new]}
+set cleanup {zmq::ctx_term $ctx}
+
+test engine-1.1 {single frame roundtrip} -setup $setup -body {
+    set a [zmq::socket $ctx ZMQ_PAIR]
+    set b [zmq::socket $ctx ZMQ_PAIR]
+    pipePair $a $b
+    zmq::send $a hello
+    zmq::recv $b
+} -cleanup $cleanup -result hello
+
+test engine-1.2 {multipart with RCVMORE} -setup $setup -body {
+    set a [zmq::socket $ctx ZMQ_DEALER]
+    set b [zmq::socket $ctx ZMQ_DEALER]
+    pipePair $a $b
+    zmq::send $a one ZMQ_SNDMORE
+    zmq::send $a "" ZMQ_SNDMORE
+    zmq::send $a three
+    set r {}
+    lappend r [zmq::recv $b] [zmq::getsockopt $b ZMQ_RCVMORE]
+    lappend r [zmq::recv $b] [zmq::getsockopt $b ZMQ_RCVMORE]
+    lappend r [zmq::recv $b] [zmq::getsockopt $b ZMQ_RCVMORE]
+} -cleanup $cleanup -result {one 1 {} 1 three 0}
+
+test engine-1.3 {binary data and long frames} -setup $setup -body {
+    set a [zmq::socket $ctx ZMQ_PAIR]
+    set b [zmq::socket $ctx ZMQ_PAIR]
+    pipePair $a $b
+    set data [string repeat [binary format c* {0 255 13 10 26}] 100000]
+    zmq::send $a $data
+    expr {[zmq::recv $b] eq $data}
+} -cleanup $cleanup -result 1
+
+test engine-1.4 {both directions} -setup $setup -body {
+    set a [zmq::socket $ctx ZMQ_PAIR]
+    set b [zmq::socket $ctx ZMQ_PAIR]
+    pipePair $a $b
+    zmq::send $a ping
+    zmq::send $b [zmq::recv $b]-pong
+    zmq::recv $a
+} -cleanup $cleanup -result ping-pong
+
+test engine-1.5 {non-byte data is rejected} -setup $setup -body {
+    zmqerr {zmq::send [zmq::socket $ctx ZMQ_PAIR] "\u20ac"}
+} -cleanup $cleanup -result {ZMQ EINVAL}
+
+test engine-2.1 {peer metadata on messages} -setup $setup -body {
+    set a [zmq::socket $ctx ZMQ_DEALER]
+    set b [zmq::socket $ctx ZMQ_DEALER]
+    zmq::setsockopt $a ZMQ_ROUTING_ID client-1
+    pipePair $a $b
+    zmq::send $a x
+    set m [zmq::msg_init]
+    zmq::msg_recv $m $b
+    list [zmq::msg_gets $m Socket-Type] [zmq::msg_gets $m Identity] [zmq::msg_gets $m Routing-Id]
+} -cleanup $cleanup -result {DEALER client-1 client-1}
+
+test engine-2.2 {incompatible socket types are disconnected} -setup $setup -body {
+    set a [zmq::socket $ctx ZMQ_PUSH]
+    set b [zmq::socket $ctx ZMQ_PUSH]
+    pipePair $a $b
+    waitFor {[pipes $a] == 0 && [pipes $b] == 0}
+} -cleanup $cleanup -result 1
+
+test engine-2.3 {peer close detaches the pipe} -setup $setup -body {
+    set a [zmq::socket $ctx ZMQ_PAIR]
+    set b [zmq::socket $ctx ZMQ_PAIR]
+    pipePair $a $b
+    zmq::send $a hi
+    zmq::recv $b
+    zmq::close $a
+    waitFor {[pipes $b] == 0}
+} -cleanup $cleanup -result 1
+
+test engine-3.1 {DONTWAIT recv on empty socket} -setup $setup -body {
+    zmqerr {zmq::recv [zmq::socket $ctx ZMQ_PAIR] ZMQ_DONTWAIT}
+} -cleanup $cleanup -result {ZMQ EAGAIN}
+
+test engine-3.2 {DONTWAIT send without pipes} -setup $setup -body {
+    zmqerr {zmq::send [zmq::socket $ctx ZMQ_PAIR] x ZMQ_DONTWAIT}
+} -cleanup $cleanup -result {ZMQ EAGAIN}
+
+test engine-3.3 {RCVTIMEO} -setup $setup -body {
+    set s [zmq::socket $ctx ZMQ_PAIR]
+    zmq::setsockopt $s ZMQ_RCVTIMEO 50
+    set t [clock milliseconds]
+    list [zmqerr {zmq::recv $s}] [expr {[clock milliseconds] - $t >= 50}]
+} -cleanup $cleanup -result {{ZMQ EAGAIN} 1}
+
+test engine-3.4 {SNDTIMEO} -setup $setup -body {
+    set s [zmq::socket $ctx ZMQ_PAIR]
+    zmq::setsockopt $s ZMQ_SNDTIMEO 20
+    zmqerr {zmq::send $s x}
+} -cleanup $cleanup -result {ZMQ EAGAIN}
+
+test engine-3.5 {send blocks until handshake completes} -setup $setup -body {
+    set a [zmq::socket $ctx ZMQ_PAIR]
+    set b [zmq::socket $ctx ZMQ_PAIR]
+    after 20 [list pipePair $a $b]
+    zmq::send $a late
+    zmq::recv $b
+} -cleanup $cleanup -result late
+
+test engine-3.6 {ctx_shutdown wakes a blocked recv} -setup $setup -body {
+    set s [zmq::socket $ctx ZMQ_PAIR]
+    after 20 [list zmq::ctx_shutdown $ctx]
+    zmqerr {zmq::recv $s}
+} -cleanup $cleanup -result {ZMQ ETERM}
+
+test engine-3.7 {recv inside a coroutine yields to the event loop} -setup $setup -body {
+    set a [zmq::socket $ctx ZMQ_PAIR]
+    set b [zmq::socket $ctx ZMQ_PAIR]
+    pipePair $a $b
+    unset -nocomplain ::got
+    coroutine reader apply {{b} {set ::got [zmq::recv $b]}} $b
+    set before [info exists ::got]
+    zmq::send $a later
+    waitFor {[info exists ::got]}
+    list $before $::got
+} -cleanup $cleanup -result {0 later}
+
+test engine-4.1 {load balancing over ready pipes} -setup $setup -body {
+    set a [zmq::socket $ctx ZMQ_DEALER]
+    set b [zmq::socket $ctx ZMQ_DEALER]
+    set c [zmq::socket $ctx ZMQ_DEALER]
+    pipePair $a $b
+    pipePair $a $c
+    waitFor {[readyPipes $a] == 2}
+    foreach i {1 2 3 4} {zmq::send $a $i}
+    lsort [list [zmq::recv $b] [zmq::recv $b] [zmq::recv $c] [zmq::recv $c]]
+} -cleanup $cleanup -result {1 2 3 4}
+
+test engine-4.2 {RCVHWM applies back-pressure without losing messages} -setup $setup -body {
+    set a [zmq::socket $ctx ZMQ_PUSH]
+    set b [zmq::socket $ctx ZMQ_PULL]
+    zmq::setsockopt $b ZMQ_RCVHWM 2
+    pipePair $a $b
+    for {set i 0} {$i < 20} {incr i} {zmq::send $a $i}
+    waitFor {[llength [dict get $::zmq::sockets($b) inq]] >= 2}
+    set queued [llength [dict get $::zmq::sockets($b) inq]]
+    set r {}
+    for {set i 0} {$i < 20} {incr i} {lappend r [zmq::recv $b]}
+    list [expr {$queued <= 3}] $r
+} -cleanup $cleanup -result {1 {0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19}}
+
+test engine-5.1 {greeting and READY on the wire} -setup $setup -body {
+    set s [zmq::socket $ctx ZMQ_PAIR]
+    lassign [rawPeer $s] rr rw
+    set g [zmq::zmtp::parse_greeting [rawRead $rr 64]]
+    rawSend $rw [zmq::zmtp::greeting]
+    set f [rawFrame $rr]
+    set cmd [zmq::zmtp::parse_command [dict get $f body]]
+    list [dict get $g mechanism] [dict get $f command] [dict get $cmd name] \
+        [zmq::zmtp::parse_metadata [dict get $cmd data]]
+} -cleanup $cleanup -result {NULL 1 READY {Socket-Type PAIR}}
+
+test engine-5.2 {messages and PING/PONG on the wire} -setup $setup -body {
+    set s [zmq::socket $ctx ZMQ_PAIR]
+    lassign [rawPeer $s] rr rw
+    rawRead $rr 64
+    rawSend $rw [zmq::zmtp::greeting][zmq::zmtp::ready PAIR]
+    rawFrame $rr
+    rawSend $rw [zmq::zmtp::command PING [binary format S 0]ctx][zmq::zmtp::frame hi]
+    set pong [zmq::zmtp::parse_command [dict get [rawFrame $rr] body]]
+    set got [zmq::recv $s]
+    zmq::send $s yo ZMQ_SNDMORE
+    zmq::send $s ""
+    list $pong $got [rawFrame $rr] [rawFrame $rr]
+} -cleanup $cleanup -result {{name PONG data ctx} hi {more 1 command 0 body yo length 4} {more 0 command 0 body {} length 2}}
+
+test engine-5.3 {non-ZMTP peer is disconnected} -setup $setup -body {
+    set s [zmq::socket $ctx ZMQ_PAIR]
+    lassign [rawPeer $s] rr rw
+    rawSend $rw "GET / HTTP/1.1\r\n"
+    waitFor {[pipes $s] == 0}
+} -cleanup $cleanup -result 1
+
+test engine-5.4 {protocol error after handshake sends ERROR} -setup $setup -body {
+    set s [zmq::socket $ctx ZMQ_PAIR]
+    lassign [rawPeer $s] rr rw
+    rawRead $rr 64
+    rawSend $rw [zmq::zmtp::greeting][zmq::zmtp::frame notready]
+    rawFrame $rr
+    set err [zmq::zmtp::parse_command [dict get [rawFrame $rr] body]]
+    list [dict get $err name] [waitFor {[pipes $s] == 0}]
+} -cleanup $cleanup -result {ERROR 1}
+
+cleanupTests

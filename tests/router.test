@@ -1,0 +1,139 @@
+source [file join [file dirname [file normalize [info script]]] setup.tcl]
+
+proc recvAll {s} {
+    set frames [list [zmq::recv $s]]
+    while {[zmq::getsockopt $s ZMQ_RCVMORE]} {
+        lappend frames [zmq::recv $s]
+    }
+    return $frames
+}
+
+proc sendAll {s frames} {
+    foreach f [lrange $frames 0 end-1] {
+        zmq::send $s $f ZMQ_SNDMORE
+    }
+    zmq::send $s [lindex $frames end]
+}
+
+proc readyPipes {socket} {
+    set n 0
+    foreach p [dict get $::zmq::sockets($socket) pipes] {
+        incr n [expr {[dict get $::zmq::conns($p) state] eq "ready"}]
+    }
+    return $n
+}
+
+set setup {set ctx [zmq::ctx_new]}
+set cleanup {zmq::ctx_term $ctx}
+
+test router-1.1 {generated routing id is prepended and routes the reply} -setup $setup -body {
+    set r [zmq::socket $ctx ZMQ_ROUTER]
+    set d [zmq::socket $ctx ZMQ_DEALER]
+    pipePair $r $d
+    sendAll $d {hello world}
+    lassign [recvAll $r] id a b
+    sendAll $r [list $id reply]
+    list [string length $id] [expr {[string index $id 0] eq "\x00"}] $a $b [recvAll $d]
+} -cleanup $cleanup -result {5 1 hello world reply}
+
+test router-1.2 {peer ROUTING_ID is used as routing id} -setup $setup -body {
+    set r [zmq::socket $ctx ZMQ_ROUTER]
+    set d [zmq::socket $ctx ZMQ_DEALER]
+    zmq::setsockopt $d ZMQ_ROUTING_ID client-1
+    pipePair $r $d
+    zmq::send $d x
+    set m [zmq::msg_init]
+    zmq::msg_recv $m $r
+    list [zmq::msg_data $m] [zmq::msg_gets $m Routing-Id] [zmq::recv $r]
+} -cleanup $cleanup -result {client-1 client-1 x}
+
+test router-1.3 {replies reach the right peer} -setup $setup -body {
+    set r [zmq::socket $ctx ZMQ_ROUTER]
+    set a [zmq::socket $ctx ZMQ_DEALER]
+    set b [zmq::socket $ctx ZMQ_DEALER]
+    zmq::setsockopt $a ZMQ_ROUTING_ID A
+    zmq::setsockopt $b ZMQ_ROUTING_ID B
+    pipePair $r $a
+    pipePair $r $b
+    zmq::send $a from-a
+    zmq::send $b from-b
+    recvAll $r
+    recvAll $r
+    sendAll $r {B to-b}
+    sendAll $r {A to-a}
+    list [zmq::recv $a] [zmq::recv $b]
+} -cleanup $cleanup -result {to-a to-b}
+
+test router-1.4 {Jupyter-style envelope} -setup $setup -body {
+    set r [zmq::socket $ctx ZMQ_ROUTER]
+    set d [zmq::socket $ctx ZMQ_DEALER]
+    zmq::setsockopt $d ZMQ_ROUTING_ID session
+    pipePair $r $d
+    sendAll $d {<IDS|MSG> sig header parent meta content}
+    set in [recvAll $r]
+    sendAll $r [list session <IDS|MSG> sig2 h p m c]
+    list $in [recvAll $d]
+} -cleanup $cleanup -result {{session <IDS|MSG> sig header parent meta content} {<IDS|MSG> sig2 h p m c}}
+
+test router-2.1 {unknown routing id is dropped silently} -setup $setup -body {
+    set r [zmq::socket $ctx ZMQ_ROUTER]
+    sendAll $r {nobody hello}
+    zmq::getsockopt $r ZMQ_EVENTS
+} -cleanup $cleanup -result 2
+
+test router-2.2 {ROUTER_MANDATORY reports unknown peers} -setup $setup -body {
+    set r [zmq::socket $ctx ZMQ_ROUTER]
+    zmq::setsockopt $r ZMQ_ROUTER_MANDATORY 1
+    zmqerr {zmq::send $r nobody ZMQ_SNDMORE}
+} -cleanup $cleanup -result {ZMQ EHOSTUNREACH}
+
+test router-2.3 {duplicate routing id is rejected} -setup $setup -body {
+    set r [zmq::socket $ctx ZMQ_ROUTER]
+    set a [zmq::socket $ctx ZMQ_DEALER]
+    set b [zmq::socket $ctx ZMQ_DEALER]
+    zmq::setsockopt $a ZMQ_ROUTING_ID same
+    zmq::setsockopt $b ZMQ_ROUTING_ID same
+    pipePair $r $a
+    waitFor {[readyPipes $r] == 1}
+    pipePair $r $b
+    waitFor {[llength [dict get $::zmq::sockets($b) pipes]] == 0}
+    sendAll $r {same hi}
+    zmq::recv $a
+} -cleanup $cleanup -result hi
+
+test router-2.4 {ROUTER_HANDOVER gives the id to the new peer} -setup $setup -body {
+    set r [zmq::socket $ctx ZMQ_ROUTER]
+    zmq::setsockopt $r ZMQ_ROUTER_HANDOVER 1
+    set a [zmq::socket $ctx ZMQ_DEALER]
+    set b [zmq::socket $ctx ZMQ_DEALER]
+    zmq::setsockopt $a ZMQ_ROUTING_ID same
+    zmq::setsockopt $b ZMQ_ROUTING_ID same
+    pipePair $r $a
+    waitFor {[readyPipes $r] == 1}
+    pipePair $r $b
+    waitFor {[llength [dict get $::zmq::sockets($a) pipes]] == 0}
+    sendAll $r {same hi}
+    zmq::recv $b
+} -cleanup $cleanup -result hi
+
+test router-3.1 {libzmq DEALER to Tcl ROUTER over tcp} -constraints pyzmq -setup $setup -body {
+    set r [zmq::socket $ctx ZMQ_ROUTER]
+    zmq::bind $r tcp://127.0.0.1:*
+    set chan [open |[list $::python -u -c {
+import sys, zmq
+s = zmq.Context().socket(zmq.DEALER)
+s.setsockopt(zmq.ROUTING_ID, b"client")
+s.connect(sys.argv[1])
+s.send_multipart([b"<IDS|MSG>", b"body"])
+print(s.recv_multipart())
+} [zmq::getsockopt $r ZMQ_LAST_ENDPOINT]] r]
+    set in [recvAll $r]
+    sendAll $r {client reply}
+    list $in [gets $chan]
+} -cleanup {
+    catch {exec kill [pid $chan]}
+    catch {close $chan}
+    zmq::ctx_term $ctx
+} -result {{client <IDS|MSG> body} {[b'reply']}}
+
+cleanupTests
