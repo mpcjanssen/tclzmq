@@ -297,16 +297,24 @@ proc ::zmq::send {socket data {flags 0}} {
     Live $socket
     set flags [ToInt $flags]
     if {$flags & ~3} {
-        Fail EINVAL
+        Fail EINVAL "invalid send flags $flags"
     }
     if {![CanSend $socket]} {
         Fail ENOTSUP
     }
-    if {[regexp {[^\x00-\xff]} $data]} {
-        Fail EINVAL
-    }
+    CheckBytes $data
     SendFrame $socket $data $flags
     return [string length $data]
+}
+
+# Frames are bytes; reject characters that cannot be sent as a single byte.
+proc ::zmq::CheckBytes {data {what "data"}} {
+    if {[regexp -indices {[^\x00-\xff]} $data range]} {
+        set idx [lindex $range 0]
+        set char [string index $data $idx]
+        Fail EINVAL [format {%s contains non-byte character U+%04X at index %d (convert text with: encoding convertto utf-8)} \
+            $what [scan $char %c] $idx]
+    }
 }
 
 proc ::zmq::send_const {socket data {flags 0}} {
@@ -345,17 +353,20 @@ proc ::zmq::send_multipart {socket frames {flags 0}} {
     variable const
     Live $socket
     set flags [ToInt $flags]
-    if {($flags & ~3) || ![llength $frames]} {
-        Fail EINVAL
+    if {$flags & ~3} {
+        Fail EINVAL "invalid send flags $flags"
+    }
+    if {![llength $frames]} {
+        Fail EINVAL "no frames to send"
     }
     if {![CanSend $socket]} {
         Fail ENOTSUP
     }
     # Validate everything first so a bad frame cannot leave a partial message.
+    set i 0
     foreach frame $frames {
-        if {[regexp {[^\x00-\xff]} $frame]} {
-            Fail EINVAL
-        }
+        CheckBytes $frame "frame $i"
+        incr i
     }
     set total 0
     foreach frame [lrange $frames 0 end-1] {

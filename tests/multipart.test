@@ -63,4 +63,9 @@ test multipart-2.4 {direction checks} -setup $setup -body {
         [zmqerr {zmq::recv_multipart [zmq::socket $ctx ZMQ_PUB]}]
 } -cleanup $cleanup -result {{ZMQ ENOTSUP} {ZMQ ENOTSUP}}
 
+test multipart-2.5 {error message names the bad frame} -setup $setup -body {
+    set s [zmq::socket $ctx ZMQ_PAIR]
+    list [catch {zmq::send_multipart $s [list a "caf\u00e9 \u20ac"]} msg] $msg
+} -cleanup $cleanup -result {1 {frame 1 contains non-byte character U+20AC at index 5 (convert text with: encoding convertto utf-8)}}
+
 cleanupTests

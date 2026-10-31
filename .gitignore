@@ -18,3 +18,12 @@ Thumbs.db
 *.log
 /tmp/
 *.kit
+
+# Backups and merge leftovers
+*.bak
+*.orig
+*.rej
+
+# Local environment
+.envrc
+.direnv/
