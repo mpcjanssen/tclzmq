@@ -72,6 +72,9 @@ Tcl Jupyter kernel (the kernel lives in a separate repo, `../tcljupyter`).
 
 - `make test` runs everything with `tclsh9.0`. `make test-tcp` also runs the tests constrained by
   `tcpTransport`, which need `connect`. `make venv` creates `.venv` with pyzmq via uv.
+- `./configure --prefix=DIR` writes `config.mk` (git-ignored), which the Makefile includes.
+  `make install` copies `lib/zmq/*.tcl` to `$(DESTDIR)$(LIBDIR)/zmq$(VERSION)`. VERSION is
+  taken from `pkgIndex.tcl`, so bump the version only there.
 - Tests source `tests/setup.tcl`. It provides these helpers:
   - `zmqerr {script}` returns e.g. `ZMQ EINVAL`.
   - `pipePair a b` connects two sockets through `chan pipe`.

@@ -15,6 +15,7 @@ __pycache__/
 Thumbs.db
 
 # Test and build artifacts
+config.mk
 *.log
 /tmp/
 *.kit

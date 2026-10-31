@@ -27,6 +27,17 @@ Data is handled as byte strings. Convert text with `encoding convertto utf-8` be
   - `z85.tcl`, `constants.tcl`, `error.tcl`
 - `tests/`: tcltest suite. `interop.test` checks behaviour against libzmq through pyzmq.
 
+## Installing
+
+```sh
+./configure --prefix=/usr/local     # optional: --libdir=DIR, --with-tclsh=PATH
+make install                        # installs to $libdir/zmq<version>; honours DESTDIR
+make uninstall
+```
+
+Without `./configure`, the default prefix is `/usr/local`. Make sure the install directory is
+on `auto_path` (or `TCLLIBPATH`).
+
 ## Testing
 
 ```sh
