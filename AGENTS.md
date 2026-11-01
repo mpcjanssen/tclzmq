@@ -42,6 +42,8 @@ Tcl Jupyter kernel (the kernel lives in a separate repo, `../tcljupyter`).
 - **Tcl version.** Target Tcl 8.6+. Do not use 8.7/9-only commands (`dict getdef`, `lpop`,
   `lseq`, ...). Tests run on `tclsh9.0`.
 - **Comments.** Keep them to one short line, and only for things the code cannot show.
+- **Commits.** Do not add a `Co-authored-by: Copilot` trailer (or any other co-author line) to
+  commit messages in this repo. Stage only the files the task changed, and push only when asked.
 
 ## Architecture lessons
 
