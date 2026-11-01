@@ -109,4 +109,26 @@ print(s.recv_multipart())
     unset -nocomplain chan
 } -result {{client <IDS|MSG> body} {[b'reply']}}
 
+test interop-1.3 {Tcl REP echoes a libzmq REQ heartbeat} -constraints {pyzmq tcpTransport} -setup {
+    set ctx [zmq::ctx_new]
+    set s [zmq::socket $ctx ZMQ_REP]
+    zmq::bind $s tcp://127.0.0.1:*
+    regexp {:(\d+)$} [zmq::getsockopt $s ZMQ_LAST_ENDPOINT] -> port
+    set chan [open |[list $::python -u -c [string map [list @PORT@ $port] {
+import zmq
+s = zmq.Context().socket(zmq.REQ)
+s.connect("tcp://127.0.0.1:@PORT@")
+s.send(b"ping")
+print(s.recv())
+}]] r]
+} -body {
+    set msg [zmq::recv $s]
+    zmq::send $s $msg
+    gets $chan
+} -cleanup {
+    zmq::ctx_term $ctx
+    catch {stopPeer $chan}
+    unset -nocomplain chan
+} -result {b'ping'}
+
 cleanupTests

@@ -1,10 +1,11 @@
 # Common setup sourced by every *.test file.
-package require tcltest 2.2
-namespace import -force ::tcltest::*
-
+# Require zmq before tcltest: loading tcltest first can pick up an installed copy.
 set ::auto_path [linsert $::auto_path 0 \
     [file join [file dirname [file dirname [file normalize [info script]]]] lib]]
 package require zmq
+
+package require tcltest 2.2
+namespace import -force ::tcltest::*
 
 # Enable with: tests/all.tcl -constraints tcpTransport (make test-tcp).
 testConstraint tcpTransport [expr {"tcpTransport" in [configure -constraints]}]

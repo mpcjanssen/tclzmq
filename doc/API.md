@@ -121,7 +121,8 @@ Otherwise it fails with `ENOENT`.
 | XPUB | like PUB | subscription messages (see below) |
 | SUB | — | messages matching a subscription |
 | XSUB | to all peers; `\x01topic` / `\x00topic` (un)subscribes | like SUB |
-| REQ, REP, STREAM | generic (no request/reply state yet) | generic |
+| REQ, STREAM | generic (no request/reply state yet) | generic |
+| REP | envelope kept per request; reply goes to the originating peer | generic |
 
 **ROUTER**
 - **Routing ids.** Each peer gets a routing id. If the peer set `ZMQ_ROUTING_ID`, that value is

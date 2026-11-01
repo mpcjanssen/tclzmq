@@ -51,7 +51,7 @@ Other types override `SendFrame`/`RecvFrame` behaviour.
       `ZMQ_ROUTER_HANDOVER` (`lib/zmq/routing.tcl`)
 - [x] **[J]** PUB: iopub channel; prefix filtering on the sender side
 - [x] **[J]** XPUB: newer Jupyter iopub (subscription notifications, `ZMQ_XPUB_VERBOSE`)
-- [ ] **[J]** REP: heartbeat channel (echo)
+- [x] **[J]** REP: heartbeat channel (echo)
 - [ ] DEALER, REQ (`ZMQ_REQ_CORRELATE`, `ZMQ_REQ_RELAXED`)
 - [x] SUB / XSUB: subscriptions are sent as legacy messages; SUBSCRIBE/CANCEL commands are accepted
 - [ ] XPUB: `ZMQ_XPUB_VERBOSER` (report every cancel), `ZMQ_XPUB_MANUAL`
