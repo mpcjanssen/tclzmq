@@ -24,7 +24,8 @@ Status markers:
   `zmq::strerror <ERRNO>`, or a more specific text where one helps. Error names are symbolic
   (`EAGAIN`, not a number).
 - **Data.** Data is a byte string. Characters above `\xff` are rejected with `EINVAL`; convert text
-  with `encoding convertto utf-8` first.
+  with `encoding convertto utf-8` first. Pass binary bytearrays (for example, values from
+  `binary format`) directly, without text encoding.
 - **Buffers.** C pointer/length pairs collapse into a single Tcl value.
 - **Blocking.** Blocking calls run the Tcl event loop (`vwait`). Inside a coroutine they `yield`
   instead and are resumed when ready, which avoids nested `vwait`s.

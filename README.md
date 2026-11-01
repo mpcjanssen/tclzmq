@@ -17,7 +17,8 @@ It is meant to give a Tcl Jupyter kernel ZeroMQ support without a compiled exten
 
 Options, socket types and flags can be given as integers or constant names.
 You can also call everything through the `zmq` ensemble, e.g. `zmq socket $ctx ZMQ_REQ`.
-Data is handled as byte strings. Convert text with `encoding convertto utf-8` before sending it.
+Data is handled as byte strings. Convert text with `encoding convertto utf-8` before sending it;
+pass binary bytearrays (for example, values from `binary format`) directly, without text encoding.
 
 ## Layout
 
